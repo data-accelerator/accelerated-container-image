@@ -728,6 +728,7 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		return err
 	}
 
+	log.G(ctx).Debugf("labels: %v", info.Labels)
 	stype, err := o.identifySnapshotStorageType(ctx, id, info)
 	if err != nil {
 		return err
@@ -1041,14 +1042,26 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 	if err == nil {
 		return st, nil
 	}
-	log.G(ctx).Debugf("failed to identify by %s, error %v, try to identify by writable_data", filePath, err)
 
+	log.G(ctx).Debugf("failed to identify by %s, error %v, try to identify by writable_data", filePath, err)
 	// check writable data file
 	filePath = o.overlaybdWritableDataPath(id)
 	st, err = o.identifyLocalStorageType(filePath)
-	if err != nil && os.IsNotExist(err) {
+	if err == nil {
+		return st, nil
+	}
+	if os.IsNotExist(err) {
+		// check config.v1.json
+		log.G(ctx).Debugf("failed to identify by writable_data(sn: %s), try to identify by config.v1.json", id)
+		filePath = o.overlaybdConfPath(id)
+		if _, err := os.Stat(filePath); err == nil {
+			log.G(ctx).Debugf("%s/config.v1.json found, return storageTypeRemoteBlock", id)
+			return storageTypeRemoteBlock, nil
+		}
 		return storageTypeNormal, nil
 	}
+	log.G(ctx).Debugf("storageType(sn: %s): %d", id, st)
+
 	return st, err
 }
 
