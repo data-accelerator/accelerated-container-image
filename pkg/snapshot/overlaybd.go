@@ -21,8 +21,7 @@ import (
 )
 
 var (
-	writeType   int
-	zdfsIsReady bool //indicate if zdfs' binaries or rpms are ready
+	writeType int
 )
 
 const (
@@ -121,7 +120,7 @@ func hasZdfsFlagFiles(dir string) (bool, error) {
 			return false, fmt.Errorf("LSMD ERROR failed to check if %s exists. err:%s", fullPath, err)
 		}
 
-		if b == false {
+		if !b {
 			return false, nil
 		}
 	}
@@ -276,7 +275,7 @@ func PrepareMeta(idDir string, lowers []string, info snapshots.Info, recordTrace
 		}
 		logrus.Infof("construct repoBlobUrl: %s", repo)
 
-		size, err := GetBlobSize(dstDir)
+		size, _ := GetBlobSize(dstDir)
 		if err := ConstructOverlayBDSpec(dir, parent, repo, digest, info, size, recordTracePath); err != nil {
 			return err
 		}
