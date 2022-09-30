@@ -435,6 +435,16 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}
 			return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "target snapshot %q", targetRef)
 		}
+
+		isStargz, err := o.checkAndPrepareStargzForPullPhrase(ctx, key, targetRef, id, info.Labels, opts...)
+		if isStargz {
+			rollback = false
+			if err := t.Commit(); err != nil {
+				return nil, err
+			}
+			logrus.Infof("o.checkAndPrepareStargzForPullPhrase, err:%s", err)
+			return nil, err
+		}
 	}
 
 	stype := storageTypeNormal
@@ -510,6 +520,10 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}()
 		default:
 			// do nothing
+		}
+
+		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+			return nil, err
 		}
 	}
 
@@ -610,6 +624,10 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (res []mount.Mount
 				return nil, errors.Wrapf(err, "failed to attach and mount for snapshot %v", key)
 			}
 			return o.basedOnBlockDeviceMount(ctx, s, roDir)
+		}
+
+		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+			return nil, err
 		}
 	}
 	return o.normalOverlayMount(s), nil
@@ -777,6 +795,8 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 			}
 		}
 	}()
+
+	o.umountStargz(id)
 
 	_, _, err = storage.Remove(ctx, key)
 	if err != nil {
@@ -1048,12 +1068,12 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string, info snapshots.Info) (storageType, error) {
 	if _, ok := info.Labels[labelKeyTargetSnapshotRef]; ok {
-		_, hasBDBlobSize := info.Labels[labelKeyOverlayBDBlobSize]
-		_, hasBDBlobDigest := info.Labels[labelKeyOverlayBDBlobDigest]
-		_, hasRef := info.Labels[labelKeyImageRef]
-		_, hasCriRef := info.Labels[labelKeyCriImageRef]
+		blobSize, hasBDBlobSize := info.Labels[labelKeyOverlayBDBlobSize]
+		blobDigest, hasBDBlobDigest := info.Labels[labelKeyOverlayBDBlobDigest]
+		ref, hasRef := info.Labels[labelKeyImageRef]
+		criRef, hasCriRef := info.Labels[labelKeyCriImageRef]
 
-		log.G(ctx).Debugf("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s")
+		log.G(ctx).Debugf("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s", blobSize, blobDigest, ref, criRef)
 		if hasBDBlobSize && hasBDBlobDigest {
 			if hasRef || hasCriRef {
 				return storageTypeRemoteBlock, nil
