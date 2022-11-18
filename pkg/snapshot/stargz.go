@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,8 +191,6 @@ func (o *snapshotter) prepareStargzForRunPhrase(lowers []string) error {
 }
 
 func (o *snapshotter) umountStargz(id string) error {
-	//success: return nil
-	//failed:  return err
 	umountMountPoint := func(mountPoint string) error {
 		snDir := path.Dir(mountPoint)
 		if b, _ := isStargzLayer(snDir); !b {
@@ -232,10 +231,77 @@ func (o *snapshotter) umountStargz(id string) error {
 		}
 	}
 
-	logrus.Infof("Enter umountStargz(%s)", id)
+	killStargzProcess := func(mountPoint string) error {
+		searchStargzCmdLine := func() string {
+			cmdLine := "ps -ef | grep -w " + stargzBinary
+			cmdLine += " " + "| grep -w '\\-\\-layer_meta_path=" + layerInfoFilePath(mountPoint) + "'"
+			cmdLine += " " + "| grep -v ' grep '"
+
+			return cmdLine
+		}
+		getProcessNumByCmdline := func(cmdLine string) (int, error) {
+			cmd := exec.Command("/bin/bash", "-c", cmdLine)
+			out, err := cmd.Output()
+			if err != nil {
+				logrus.Errorf("ERROR failed to  cmd.Output(), cmdLine:%s, err:%s", cmdLine, err)
+				return 0, err
+			}
+
+			strVal := strings.Trim(string(out), "\n ")
+			num, err := strconv.Atoi(strVal)
+			if err != nil {
+				logrus.Errorf("ERROR Atoi(%s). cmdLine:%s, err:%s ", strVal, cmdLine, err)
+				return 0, err
+			}
+			if num != 1 {
+				logrus.Infof("getProcessNumByCmdline(...), get %d processes, cmdLine:%s", num, cmdLine)
+			}
+			return num, nil
+		}
+		getStargzProcessNum := func() (int, error) {
+			cmdLine := searchStargzCmdLine()
+			cmdLine += " " + "| wc -l"
+			return getProcessNumByCmdline(cmdLine)
+		}
+		doKillStargz := func() error {
+			cmdLine := searchStargzCmdLine()
+			cmdLine += "|awk '{print $2}' | xargs kill -9"
+			cmd := exec.Command("/bin/bash", "-c", cmdLine)
+			out, err := cmd.Output()
+			if err != nil {
+				logrus.Errorf("Failed to doKillStargz(), cmdLine:%s, out:%s, err:%s", cmdLine, string(out), err)
+			} else {
+				logrus.Infof("Success to doKillStargz(), cmdLine:%s", cmdLine)
+			}
+			if num, err := getStargzProcessNum(); err != nil || num != 0 {
+				errRet := fmt.Errorf("Failed to doKillStargz(). stargz process num is %d, err:%s", num, err)
+				logrus.Errorf("%s", errRet)
+				return errRet
+			}
+			logrus.Infof("Success to doKillStargz(), mountPoint:%s", mountPoint)
+			return nil
+		}
+		stargzNum, err := getStargzProcessNum()
+		if err != nil {
+			logrus.Errorf("Failed to getStargzProcessNum(), err:%s", err)
+			return err
+		}
+		if stargzNum == 0 {
+			logrus.Infof("stargz process number is 0. So no need to kill astargz process. mountPoint:%s", mountPoint)
+			return nil
+		}
+		return doKillStargz()
+	}
+
 	snDir := o.getSnDir(id)
 	mp := path.Join(snDir, "fs")
-	return umountMountPoint(mp)
+	if err := umountMountPoint(mp); err != nil {
+		logrus.Errorf("Failed to umountMountPoint(%s)", mp)
+		return err
+	}
+	logrus.Infof("Success to umountMountPoint(%s)", mp)
+
+	return killStargzProcess(mp)
 }
 
 func stargzBinaryExists() bool {
