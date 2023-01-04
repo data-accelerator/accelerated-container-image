@@ -153,6 +153,8 @@ var defaultConfig = SnapshotterConfig{
 	OverlayBDUtilBinDir: "/opt/overlaybd/bin",
 }
 
+var commitLayerFlag = ".overlaybd_committed"
+
 // Opt is an option to configure the snapshotter
 type Opt func(config *SnapshotterConfig) error
 
@@ -718,6 +720,46 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	return t.Commit()
 }
 
+func AddCommitLayerFlag(dir string) error {
+	return ioutil.WriteFile(filepath.Join(dir, commitLayerFlag), []byte(commitLayerFlag), 0666)
+}
+
+func HasCommitLayerFlag(dir string) bool {
+	b, _ := pathExists(filepath.Join(dir, commitLayerFlag))
+	return b
+}
+
+func (o *snapshotter) CommitMark(ctx context.Context, id, parent string) error {
+	logrus.Infof("MardDadi id=%s, parent=%s", id, parent)
+	if ok, _ := IsZdfsLayer(o.getSnDir(id)); ok {
+		return AddCommitLayerFlag(o.getSnDir(id))
+	}
+	if parent != "" {
+		parentID, _, _, err := storage.GetInfo(ctx, parent)
+		if err != nil {
+			return err
+		}
+		parentDir := o.getSnDir(parentID)
+		// try make a fake config.v1.json in committed layers
+		srcPath := filepath.Join(parentDir, "block", "config.v1.json")
+		if _, err := os.Stat(srcPath); err != nil && os.IsNotExist(err) {
+			return nil
+		}
+		data, err := ioutil.ReadFile(srcPath)
+		if err != nil {
+			return err
+		}
+		if err := ioutil.WriteFile(filepath.Join(o.getSnDir(id), "block", "config.v1.json"), data, 0666); err != nil {
+			return err
+		}
+
+		if ok, _ := IsZdfsLayer(parentDir); HasCommitLayerFlag(parentDir) || ok {
+			return AddCommitLayerFlag(o.getSnDir(id))
+		}
+	}
+	return nil
+}
+
 func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (string, snapshots.Info, error) {
 	id, _, _, err := storage.GetInfo(ctx, key)
 	if err != nil {
@@ -737,6 +779,7 @@ func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snap
 	if err != nil {
 		return "", snapshots.Info{}, err
 	}
+	o.CommitMark(ctx, id, info.Parent)
 	return id, info, nil
 }
 
@@ -833,24 +876,22 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 		return td, err
 	}
 
-	if kind == snapshots.KindActive {
-		if err := os.Mkdir(filepath.Join(td, "work"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "work"), 0711); err != nil {
+		return td, err
+	}
 
-		if err := os.Mkdir(filepath.Join(td, "block"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "block"), 0711); err != nil {
+		return td, err
+	}
 
-		if err := os.Mkdir(filepath.Join(td, "block", "mountpoint"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "block", "mountpoint"), 0711); err != nil {
+		return td, err
+	}
 
-		f, err := os.Create(filepath.Join(td, "block", "init-debug.log"))
-		f.Close()
-		if err != nil {
-			return td, err
-		}
+	f, err := os.Create(filepath.Join(td, "block", "init-debug.log"))
+	f.Close()
+	if err != nil {
+		return td, err
 	}
 	return td, nil
 }
@@ -903,8 +944,19 @@ func (o *snapshotter) basedOnBlockDeviceMount(ctx context.Context, s storage.Sna
 			options = append(options,
 				fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
 				fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
-				fmt.Sprintf("lowerdir=%s", o.overlaybdMountpoint(s.ParentIDs[0])),
 			)
+			lowers := o.convertIDsToDirs(s.ParentIDs)
+			var fsLowers []string
+			for i := range lowers {
+				if HasCommitLayerFlag(lowers[i]) {
+					fsLowers = append(fsLowers, filepath.Join(lowers[i], "fs"))
+				}
+			}
+			if len(fsLowers) > 0 {
+				options = append(options, fmt.Sprintf("lowerdir=%s:%s", strings.Join(fsLowers, ":"), o.overlaybdMountpoint(s.ParentIDs[0])))
+			} else {
+				options = append(options, fmt.Sprintf("lowerdir=%s", o.overlaybdMountpoint(s.ParentIDs[0])))
+			}
 			return []mount.Mount{
 				{
 					Type:    "overlay",

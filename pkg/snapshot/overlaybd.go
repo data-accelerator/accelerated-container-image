@@ -155,6 +155,9 @@ func (o *snapshotter) MountDadiSnapshot(ctx context.Context, key string, info sn
 	//check dadi layer
 	dir := o.getSnDir(s.ParentIDs[0])
 	isDadi, err := IsZdfsLayer(dir)
+	if !isDadi {
+		isDadi = HasCommitLayerFlag(dir)
+	}
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("[DADI] invalid dadi snapshot as parent: %s", dir)
 		return false, "", errors.Wrapf(err, "[DADI] invalid dadi snapshot as parent")
