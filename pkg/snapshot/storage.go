@@ -72,10 +72,12 @@ type OverlayBDBSConfig struct {
 
 // OverlayBDBSConfigLower
 type OverlayBDBSConfigLower struct {
-	File   string `json:"file,omitempty"`
-	Digest string `json:"digest,omitempty"`
-	Size   int64  `json:"size,omitempty"`
-	Dir    string `json:"dir,omitempty"`
+	DataFile   string `json:"dataFile,omitempty"`
+	DataDigest string `json:"dataDigest,omitempty"`
+	File       string `json:"file,omitempty"`
+	Digest     string `json:"digest,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	Dir        string `json:"dir,omitempty"`
 }
 
 type OverlayBDBSConfigUpper struct {
