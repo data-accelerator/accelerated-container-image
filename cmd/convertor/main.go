@@ -33,28 +33,33 @@ var (
 	tagInput  string
 	tagOutput string
 	dir       string
-	foci      bool
-	overlaybd bool
+	foci      string
+	overlaybd string
 
 	rootCmd = &cobra.Command{
 		Use:   "overlaybd-convertor",
 		Short: "An image conversion tool from oci image to overlaybd image.",
 		Long:  "overlaybd-convertor is a standalone userspace image conversion tool that helps converting oci images to overlaybd images",
 		Run: func(cmd *cobra.Command, args []string) {
+			if overlaybd == "" && foci == "" {
+				if tagOutput == "" {
+					logrus.Error("output-tag is required, you can specify it by [-o|--overlaybd|--foci]")
+					os.Exit(1)
+				}
+				overlaybd = tagOutput
+			}
+
 			ctx := context.Background()
 			opt := builder.BuilderOptions{
 				Ref:       repo + ":" + tagInput,
-				TargetRef: repo + ":" + tagOutput,
 				Auth:      user,
 				PlainHTTP: plain,
 				WorkDir:   dir,
 			}
-			if !overlaybd && !foci {
-				overlaybd = true
-			}
-			if overlaybd {
+			if overlaybd != "" {
 				logrus.Info("building overlaybd ...")
 				opt.Engine = builder.BuilderEngineTypeOverlayBD
+				opt.TargetRef = repo + ":" + overlaybd
 				builder, err := builder.NewOverlayBDBuilder(ctx, opt)
 				if err != nil {
 					logrus.Errorf("failed to create overlaybd builder: %v", err)
@@ -66,9 +71,10 @@ var (
 				}
 				logrus.Info("overlaybd build finished")
 			}
-			if foci {
+			if foci != "" {
 				logrus.Info("building foci ...")
 				opt.Engine = builder.BuilderEngineTypeFOCI
+				opt.TargetRef = repo + ":" + foci
 				builder, err := builder.NewOverlayBDBuilder(ctx, opt)
 				if err != nil {
 					logrus.Errorf("failed to create foci builder: %v", err)
@@ -92,12 +98,11 @@ func init() {
 	rootCmd.Flags().StringVarP(&tagInput, "input-tag", "i", "", "tag for image converting from (required)")
 	rootCmd.Flags().StringVarP(&tagOutput, "output-tag", "o", "", "tag for image converting to (required)")
 	rootCmd.Flags().StringVarP(&dir, "dir", "d", "tmp_conv", "directory used for temporary data")
-	rootCmd.Flags().BoolVarP(&foci, "foci", "", false, "build foci format")
-	rootCmd.Flags().BoolVarP(&overlaybd, "overlaybd", "", false, "build overlaybd format")
+	rootCmd.Flags().StringVar(&foci, "foci", "", "build foci format")
+	rootCmd.Flags().StringVar(&overlaybd, "overlaybd", "", "build overlaybd format")
 
 	rootCmd.MarkFlagRequired("repository")
 	rootCmd.MarkFlagRequired("input-tag")
-	rootCmd.MarkFlagRequired("output-tag")
 }
 
 func main() {
