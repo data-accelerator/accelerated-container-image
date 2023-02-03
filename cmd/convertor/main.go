@@ -33,7 +33,7 @@ var (
 	tagInput  string
 	tagOutput string
 	dir       string
-	foci      string
+	fastoci   string
 	overlaybd string
 
 	rootCmd = &cobra.Command{
@@ -41,9 +41,9 @@ var (
 		Short: "An image conversion tool from oci image to overlaybd image.",
 		Long:  "overlaybd-convertor is a standalone userspace image conversion tool that helps converting oci images to overlaybd images",
 		Run: func(cmd *cobra.Command, args []string) {
-			if overlaybd == "" && foci == "" {
+			if overlaybd == "" && fastoci == "" {
 				if tagOutput == "" {
-					logrus.Error("output-tag is required, you can specify it by [-o|--overlaybd|--foci]")
+					logrus.Error("output-tag is required, you can specify it by [-o|--overlaybd|--fastoci]")
 					os.Exit(1)
 				}
 				overlaybd = tagOutput
@@ -71,20 +71,20 @@ var (
 				}
 				logrus.Info("overlaybd build finished")
 			}
-			if foci != "" {
-				logrus.Info("building foci ...")
-				opt.Engine = builder.BuilderEngineTypeFOCI
-				opt.TargetRef = repo + ":" + foci
+			if fastoci != "" {
+				logrus.Info("building fastoci ...")
+				opt.Engine = builder.BuilderEngineTypeFastOCI
+				opt.TargetRef = repo + ":" + fastoci
 				builder, err := builder.NewOverlayBDBuilder(ctx, opt)
 				if err != nil {
-					logrus.Errorf("failed to create foci builder: %v", err)
+					logrus.Errorf("failed to create fastoci builder: %v", err)
 					os.Exit(1)
 				}
 				if err := builder.Build(ctx); err != nil {
-					logrus.Errorf("failed to build foci: %v", err)
+					logrus.Errorf("failed to build fastoci: %v", err)
 					os.Exit(1)
 				}
-				logrus.Info("foci build finished")
+				logrus.Info("fastoci build finished")
 			}
 		},
 	}
@@ -98,7 +98,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&tagInput, "input-tag", "i", "", "tag for image converting from (required)")
 	rootCmd.Flags().StringVarP(&tagOutput, "output-tag", "o", "", "tag for image converting to (required)")
 	rootCmd.Flags().StringVarP(&dir, "dir", "d", "tmp_conv", "directory used for temporary data")
-	rootCmd.Flags().StringVar(&foci, "foci", "", "build foci format")
+	rootCmd.Flags().StringVar(&fastoci, "fastoci", "", "build fastoci format")
 	rootCmd.Flags().StringVar(&overlaybd, "overlaybd", "", "build overlaybd format")
 
 	rootCmd.MarkFlagRequired("repository")

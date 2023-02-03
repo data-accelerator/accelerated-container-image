@@ -1,3 +1,19 @@
+/*
+   Copyright The Accelerated Container Image Authors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package builder
 
 import (
@@ -36,13 +52,13 @@ const (
 	fociIdentifier = ".fastoci.overlaybd"
 )
 
-type fociBuilderEngine struct {
+type fastOCIBuilderEngine struct {
 	*builderEngineBase
 	overlaybdConfig *snapshot.OverlayBDBSConfig
 	fociLayers      []specs.Descriptor
 }
 
-func NewFOCIBuilderEngine(base *builderEngineBase) builderEngine {
+func NewFastOCIBuilderEngine(base *builderEngineBase) builderEngine {
 	config := &snapshot.OverlayBDBSConfig{
 		Lowers:     []snapshot.OverlayBDBSConfigLower{},
 		ResultFile: "",
@@ -50,20 +66,20 @@ func NewFOCIBuilderEngine(base *builderEngineBase) builderEngine {
 	config.Lowers = append(config.Lowers, snapshot.OverlayBDBSConfigLower{
 		File: fociBaseLayer,
 	})
-	return &fociBuilderEngine{
+	return &fastOCIBuilderEngine{
 		builderEngineBase: base,
 		overlaybdConfig:   config,
 		fociLayers:        make([]specs.Descriptor, len(base.manifest.Layers)),
 	}
 }
 
-func (e *fociBuilderEngine) downloadLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) downloadLayer(ctx context.Context, idx int) error {
 	desc := e.manifest.Layers[idx]
 	targetFile := path.Join(e.getLayerDir(idx), "layer.tar")
 	return downloadLayer(ctx, e.fetcher, targetFile, desc, false)
 }
 
-func (e *fociBuilderEngine) buildLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) buildLayer(ctx context.Context, idx int) error {
 	layerDir := e.getLayerDir(idx)
 	if err := prepareWritableLayer(ctx, layerDir); err != nil {
 		return err
@@ -105,7 +121,7 @@ func (e *fociBuilderEngine) buildLayer(ctx context.Context, idx int) error {
 	return nil
 }
 
-func (e *fociBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
 	layerDir := e.getLayerDir(idx)
 	desc, err := getFileDesc(path.Join(layerDir, fociLayerTar), false)
 	if err != nil {
@@ -124,7 +140,7 @@ func (e *fociBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
 	return nil
 }
 
-func (e *fociBuilderEngine) uploadImage(ctx context.Context) error {
+func (e *fastOCIBuilderEngine) uploadImage(ctx context.Context) error {
 	for idx := range e.manifest.Layers {
 		layerDir := e.getLayerDir(idx)
 		uncompress, err := getFileDesc(path.Join(layerDir, fociLayerTar), true)
@@ -152,15 +168,15 @@ func (e *fociBuilderEngine) uploadImage(ctx context.Context) error {
 	return uploadManifestAndConfig(ctx, e.pusher, e.manifest, e.config)
 }
 
-func (e fociBuilderEngine) cleanup() {
+func (e fastOCIBuilderEngine) cleanup() {
 	os.RemoveAll(e.workDir)
 }
 
-func (e *fociBuilderEngine) getLayerDir(idx int) string {
+func (e *fastOCIBuilderEngine) getLayerDir(idx int) string {
 	return path.Join(e.workDir, fmt.Sprintf("%04d_", idx)+e.manifest.Layers[idx].Digest.String())
 }
 
-func (e *fociBuilderEngine) createIdentifier(idx int) error {
+func (e *fastOCIBuilderEngine) createIdentifier(idx int) error {
 	targetFile := path.Join(e.getLayerDir(idx), fociIdentifier)
 	file, err := os.Create(targetFile)
 	if err != nil {
