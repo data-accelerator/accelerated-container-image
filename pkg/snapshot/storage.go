@@ -524,11 +524,21 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, wr
 		}
 
 		configJSON.RepoBlobURL = blobPrefixURL
-		configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
-			Digest: blobDigest,
-			Size:   int64(blobSize),
-			Dir:    o.upperPath(id),
-		})
+		if dataDgst, isFastOCI := info.Labels[labelKeyFastOCIDigest]; isFastOCI {
+			configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
+				Digest:     blobDigest,
+				Size:       int64(blobSize),
+				Dir:        o.upperPath(id),
+				File:       o.fociFsMeta(id),
+				DataDigest: dataDgst,
+			})
+		} else {
+			configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
+				Digest: blobDigest,
+				Size:   int64(blobSize),
+				Dir:    o.upperPath(id),
+			})
+		}
 
 	case storageTypeLocalBlock:
 		if writable {
