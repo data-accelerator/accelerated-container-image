@@ -486,8 +486,11 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := info.Labels[labelKeyFastOCIDigest]; ok {
-			log.G(ctx).Debugf("layer %s is foci", s.ID)
+		if _, isFastOCI := info.Labels[labelKeyFastOCIDigest]; isFastOCI {
+			log.G(ctx).Debugf("%s is FastOCI layer", s.ID)
+			if err := o.constructOverlayBDSpec(ctx, targetRef, id, info, false); err != nil {
+				return nil, err
+			}
 			stype = storageTypeNormal
 		}
 		if stype == storageTypeRemoteBlock {
@@ -497,7 +500,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 				return nil, err
 			}
 
-			if err := o.constructOverlayBDSpec(ctx, targetRef, false); err != nil {
+			if err := o.constructOverlayBDSpec(ctx, targetRef, id, info, false); err != nil {
 				return nil, err
 			}
 
@@ -517,7 +520,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		log.G(ctx).Infof("Preparing rootfs. writeType: %s", writeType)
 		if writeType != roDir {
 			stype = storageTypeLocalBlock
-			if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
+			if err := o.constructOverlayBDSpec(ctx, key, id, info, true); err != nil {
 				log.G(ctx).Errorln(err.Error())
 				return nil, err
 			}
@@ -783,7 +786,7 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	log.G(ctx).Debugf("Commit info (id: %s, info: %v, stype: %d)", id, info.Labels, stype)
 
 	if stype == storageTypeLocalBlock {
-		if err := o.constructOverlayBDSpec(ctx, name, false); err != nil {
+		if err := o.constructOverlayBDSpec(ctx, name, id, info, false); err != nil {
 			return errors.Wrapf(err, "failed to construct overlaybd config")
 		}
 
