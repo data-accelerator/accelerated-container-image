@@ -72,10 +72,10 @@ type OverlayBDBSConfig struct {
 
 // OverlayBDBSConfigLower
 type OverlayBDBSConfigLower struct {
-	DataFile   string `json:"dataFile,omitempty"`
-	DataDigest string `json:"dataDigest,omitempty"`
 	File       string `json:"file,omitempty"`
 	Digest     string `json:"digest,omitempty"`
+	DataFile   string `json:"dataFile,omitempty"`
+	DataDigest string `json:"dataDigest,omitempty"`
 	Size       int64  `json:"size,omitempty"`
 	Dir        string `json:"dir,omitempty"`
 }
@@ -466,12 +466,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 }
 
 // constructOverlayBDSpec generates the config spec for overlaybd target.
-func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, writable bool) error {
-	id, info, _, err := storage.GetInfo(ctx, key)
-	if err != nil {
-		return errors.Wrapf(err, "failed to get info for snapshot %s", key)
-	}
-
+func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key, id string, info snapshots.Info, writable bool) error {
 	stype, err := o.identifySnapshotStorageType(ctx, id, info)
 	if err != nil {
 		return errors.Wrapf(err, "failed to identify storage of snapshot %s", key)
