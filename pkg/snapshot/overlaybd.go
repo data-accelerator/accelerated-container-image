@@ -288,7 +288,10 @@ func PrepareMeta(idDir string, lowers []string, info snapshots.Info, recordTrace
 			return err
 		}
 
-		if imageRef, ok := info.Labels[labelKeyCriImageRef]; ok {
+		refPath := path.Join(dir, ImageRefFile)
+		if b, _ := pathExists(refPath); b {
+			img, _ := ioutil.ReadFile(refPath)
+			imageRef := string(img)
 			logrus.Infof("read imageRef from labelKeyCriImageRef: %s", imageRef)
 			repo, _ = constructImageBlobURL(imageRef)
 		}
