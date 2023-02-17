@@ -39,20 +39,16 @@ import (
 
 const defaultConfigPath = "/etc/overlaybd-snapshotter/config.json"
 
-type pluginConfig struct {
-	Address  string `json:"address"`
-	Root     string `json:"root"`
-	LogLevel string `json:"verbose"`
-}
-
-var pconfig pluginConfig
+var pconfig *overlaybd.PluginConfig
 
 func parseConfig(fpath string) error {
+	pconfig = &overlaybd.PluginConfig{
+		Experimental: false,
+	}
 	data, err := ioutil.ReadFile(fpath)
 	if err != nil {
 		return errors.Wrapf(err, "failed to read plugin config from %s", fpath)
 	}
-
 	if err := json.Unmarshal(data, &pconfig); err != nil {
 		return errors.Wrapf(err, "failed to parse plugin config from %s", string(data))
 	}
@@ -76,11 +72,12 @@ func main() {
 		logrus.Infof("set log level: %s", pconfig.LogLevel)
 	}
 
-	sn, err := overlaybd.NewSnapshotter(pconfig.Root)
+	sn, err := overlaybd.NewSnapshotter(pconfig)
 	if err != nil {
 		logrus.Errorf("failed to init overlaybd snapshotter: %v", err)
 		os.Exit(1)
 	}
+
 	defer sn.Close()
 
 	srv := grpc.NewServer()

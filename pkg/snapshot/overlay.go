@@ -192,18 +192,26 @@ type Opt func(config *SnapshotterConfig) error
 //    #
 //    - metadata.db
 //,
+
+type PluginConfig struct {
+	Address      string `json:"address"`
+	Root         string `json:"root"`
+	LogLevel     string `json:"verbose"`
+	Experimental bool   `json:"experimental"`
+}
+
 type snapshotter struct {
 	root           string
 	config         SnapshotterConfig
 	ms             *storage.MetaStore
 	metacopyOption string
 	indexOff       bool
-
-	locker *locker.Locker
+	experimental   bool
+	locker         *locker.Locker
 }
 
 // NewSnapshotter returns a Snapshotter which uses block device based on overlayFS.
-func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
+func NewSnapshotter(pconfig *PluginConfig, opts ...Opt) (snapshots.Snapshotter, error) {
 	config := defaultConfig
 	for _, opt := range opts {
 		if err := opt(&config); err != nil {
@@ -211,16 +219,16 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		}
 	}
 
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := os.MkdirAll(pconfig.Root, 0700); err != nil {
 		return nil, err
 	}
 
-	ms, err := storage.NewMetaStore(filepath.Join(root, "metadata.db"))
+	ms, err := storage.NewMetaStore(filepath.Join(pconfig.Root, "metadata.db"))
 	if err != nil {
 		return nil, err
 	}
 
-	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(filepath.Join(pconfig.Root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
 
@@ -236,12 +244,13 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	return &snapshotter{
-		root:           root,
+		root:           pconfig.Root,
 		ms:             ms,
 		indexOff:       indexOff,
 		config:         config,
 		metacopyOption: metacopyOption,
 		locker:         locker.New(),
+		experimental:   pconfig.Experimental,
 	}, nil
 }
 
@@ -364,6 +373,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	if err != nil {
 		return nil, err
 	}
+	log.G(ctx).Infof("createMountPoint, id: %s, labels: %v", id, info.Labels)
 	defer func() {
 		// the transaction rollback makes created snapshot invalid, just clean it.
 		if retErr != nil && rollback {
@@ -377,7 +387,6 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	if err != nil {
 		return nil, err
 	}
-
 	var (
 		parentID   string
 		parentInfo snapshots.Info
@@ -398,7 +407,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		// Acceleration layer will not use remote snapshot. It still needs containerd to pull,
 		// unpack blob and commit snapshot. So return a normal mount point here.
 		isAccelLayer := info.Labels[labelKeyAccelerationLayer]
-		log.G(ctx).Debugf("Prepare (targetRefLabel: %s, accelLayerLabel: %s)", targetRef, isAccelLayer)
+		log.G(ctx).Infof("Prepare (targetRefLabel: %s, accelLayerLabel: %s)", targetRef, isAccelLayer)
 		if isAccelLayer == "yes" {
 			if err := o.constructSpecForAccelLayer(id, parentID); err != nil {
 				return nil, errors.Wrapf(err, "constructSpecForAccelLayer failed: id %s", id)
@@ -437,15 +446,16 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}
 			return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "target snapshot %q", targetRef)
 		}
-
-		isStargz, err := o.checkAndPrepareStargzForPullPhrase(ctx, key, targetRef, id, info.Labels, opts...)
-		if isStargz {
-			rollback = false
-			if err := t.Commit(); err != nil {
+		if o.experimental {
+			isStargz, err := o.checkAndPrepareStargzForPullPhrase(ctx, key, targetRef, id, info.Labels, opts...)
+			if isStargz {
+				rollback = false
+				if err := t.Commit(); err != nil {
+					return nil, err
+				}
+				logrus.Infof("o.checkAndPrepareStargzForPullPhrase, err:%s", err)
 				return nil, err
 			}
-			logrus.Infof("o.checkAndPrepareStargzForPullPhrase, err:%s", err)
-			return nil, err
 		}
 	}
 
@@ -470,7 +480,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 				parentIsAccelLayer := parentInfo.Labels[labelKeyAccelerationLayer] == "yes"
 				needRecordTrace := info.Labels[labelKeyRecordTrace] == "yes"
 				recordTracePath := info.Labels[labelKeyRecordTracePath]
-				log.G(ctx).Debugf("Prepare rootfs (parentIsAccelLayer: %t, needRecordTrace: %t, recordTracePath: %s)",
+				log.G(ctx).Infof("Prepare rootfs (parentIsAccelLayer: %t, needRecordTrace: %t, recordTracePath: %s)",
 					parentIsAccelLayer, needRecordTrace, recordTracePath)
 
 				if parentIsAccelLayer {
@@ -506,7 +516,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 				log.G(ctx).Warnf("cannot get fs type from label, %v", obdInfo.Labels)
 				fsType = "ext4"
 			}
-			log.G(ctx).Debugf("attachAndMountBlockDevice (obdID: %s, writeType: %d, fsType %s, targetPath: %s)",
+			log.G(ctx).Infof("attachAndMountBlockDevice (obdID: %s, writeType: %d, fsType %s, targetPath: %s)",
 				obdID, writeType, fsType, o.overlaybdTargetPath(obdID))
 			if err = o.attachAndMountBlockDevice(ctx, obdID, writeType, fsType, parent == ""); err != nil {
 				log.G(ctx).Errorf("%v", err)
@@ -524,8 +534,10 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			// do nothing
 		}
 
-		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
-			return nil, err
+		if o.experimental {
+			if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -627,9 +639,10 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (res []mount.Mount
 			}
 			return o.basedOnBlockDeviceMount(ctx, s, roDir)
 		}
-
-		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
-			return nil, err
+		if o.experimental {
+			if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return o.normalOverlayMount(s), nil
@@ -637,7 +650,7 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (res []mount.Mount
 
 // Commit
 func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (retErr error) {
-	log.G(ctx).Debugf("Commit (key: %s, name: %s)", key, name)
+	log.G(ctx).Infof("Commit (key: %s, name: %s)", key, name)
 
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
 	if err != nil {
@@ -696,7 +709,7 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		return err
 	}
 
-	log.G(ctx).Debugf("Commit info (id: %s, info: %v, stype: %d)", id, info.Labels, stype)
+	log.G(ctx).Infof("Commit info (id: %s, info: %v, stype: %d)", id, info.Labels, stype)
 
 	if stype == storageTypeLocalBlock {
 		if err := o.constructOverlayBDSpec(ctx, name, false); err != nil {
@@ -786,7 +799,7 @@ func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snap
 // Remove abandons the snapshot identified by key. The snapshot will
 // immediately become unavailable and unrecoverable.
 func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
-	log.G(ctx).Debugf("Remove (key: %s)", key)
+	log.G(ctx).Infof("Remove (key: %s)", key)
 
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
 	if err != nil {
@@ -799,7 +812,7 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		return err
 	}
 
-	log.G(ctx).Debugf("labels: %v", info.Labels)
+	log.G(ctx).Infof("labels: %v", info.Labels)
 	stype, err := o.identifySnapshotStorageType(ctx, id, info)
 	if err != nil {
 		return err
@@ -839,8 +852,9 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 	}()
 
-	o.umountStargz(id)
-
+	if o.experimental {
+		o.umountStargz(id)
+	}
 	_, _, err = storage.Remove(ctx, key)
 	if err != nil {
 		return errors.Wrap(err, "failed to remove")
@@ -1101,8 +1115,12 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	} else {
 		log.G(ctx).Warnf("sandbox meta not found.")
 	}
-
-	if img, ok := info.Labels[labelKeyCriImageRef]; ok {
+	img, ok := info.Labels[labelKeyCriImageRef]
+	if !ok {
+		img, ok = info.Labels[labelKeyImageRef]
+	}
+	if ok {
+		log.G(ctx).Infof("found imageRef: %s", img)
 		if err := ioutil.WriteFile(filepath.Join(path, ImageRefFile), []byte(img), 0644); err != nil {
 			log.G(ctx).Errorf("LSMD ERROR write imageRef '%s'. path: %s, err: %s", img, filepath.Join(path, SandBoxMetaFile), err.Error())
 		}
@@ -1125,7 +1143,7 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 		ref, hasRef := info.Labels[labelKeyImageRef]
 		criRef, hasCriRef := info.Labels[labelKeyCriImageRef]
 
-		log.G(ctx).Debugf("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s", blobSize, blobDigest, ref, criRef)
+		log.G(ctx).Infof("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s", blobSize, blobDigest, ref, criRef)
 		if hasBDBlobSize && hasBDBlobDigest {
 			if hasRef || hasCriRef {
 				return storageTypeRemoteBlock, nil
