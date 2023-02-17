@@ -19,13 +19,15 @@ package snapshot
 import (
 	"context"
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
+
+	"github.com/docker/docker/pkg/locker"
+	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
@@ -151,6 +153,8 @@ var defaultConfig = SnapshotterConfig{
 	OverlayBDUtilBinDir: "/opt/overlaybd/bin",
 }
 
+var commitLayerFlag = ".overlaybd_committed"
+
 // Opt is an option to configure the snapshotter
 type Opt func(config *SnapshotterConfig) error
 
@@ -194,6 +198,8 @@ type snapshotter struct {
 	ms             *storage.MetaStore
 	metacopyOption string
 	indexOff       bool
+
+	locker *locker.Locker
 }
 
 // NewSnapshotter returns a Snapshotter which uses block device based on overlayFS.
@@ -235,6 +241,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		indexOff:       indexOff,
 		config:         config,
 		metacopyOption: metacopyOption,
+		locker:         locker.New(),
 	}, nil
 }
 
@@ -430,6 +437,16 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}
 			return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "target snapshot %q", targetRef)
 		}
+
+		isStargz, err := o.checkAndPrepareStargzForPullPhrase(ctx, key, targetRef, id, info.Labels, opts...)
+		if isStargz {
+			rollback = false
+			if err := t.Commit(); err != nil {
+				return nil, err
+			}
+			logrus.Infof("o.checkAndPrepareStargzForPullPhrase, err:%s", err)
+			return nil, err
+		}
 	}
 
 	stype := storageTypeNormal
@@ -506,6 +523,10 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		default:
 			// do nothing
 		}
+
+		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+			return nil, err
+		}
 	}
 
 	rollback = false
@@ -571,6 +592,11 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (res []mount.Mount
 	}
 
 	if len(s.ParentIDs) > 0 {
+		o.locker.Lock(s.ID)
+		defer o.locker.Unlock(s.ID)
+		o.locker.Lock(s.ParentIDs[0])
+		defer o.locker.Unlock(s.ParentIDs[0])
+
 		_, info, _, err := storage.GetInfo(ctx, key)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get info")
@@ -600,6 +626,10 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (res []mount.Mount
 				return nil, errors.Wrapf(err, "failed to attach and mount for snapshot %v", key)
 			}
 			return o.basedOnBlockDeviceMount(ctx, s, roDir)
+		}
+
+		if err := o.prepareStargzForRunPhrase(o.convertIDsToDirs(s.ParentIDs)); err != nil {
+			return nil, err
 		}
 	}
 	return o.normalOverlayMount(s), nil
@@ -690,6 +720,46 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	return t.Commit()
 }
 
+func AddCommitLayerFlag(dir string) error {
+	return ioutil.WriteFile(filepath.Join(dir, commitLayerFlag), []byte(commitLayerFlag), 0666)
+}
+
+func HasCommitLayerFlag(dir string) bool {
+	b, _ := pathExists(filepath.Join(dir, commitLayerFlag))
+	return b
+}
+
+func (o *snapshotter) CommitMark(ctx context.Context, id, parent string) error {
+	logrus.Infof("MardDadi id=%s, parent=%s", id, parent)
+	if ok, _ := IsZdfsLayer(o.getSnDir(id)); ok {
+		return AddCommitLayerFlag(o.getSnDir(id))
+	}
+	if parent != "" {
+		parentID, _, _, err := storage.GetInfo(ctx, parent)
+		if err != nil {
+			return err
+		}
+		parentDir := o.getSnDir(parentID)
+		// try make a fake config.v1.json in committed layers
+		srcPath := filepath.Join(parentDir, "block", "config.v1.json")
+		if _, err := os.Stat(srcPath); err != nil && os.IsNotExist(err) {
+			return nil
+		}
+		data, err := ioutil.ReadFile(srcPath)
+		if err != nil {
+			return err
+		}
+		if err := ioutil.WriteFile(filepath.Join(o.getSnDir(id), "block", "config.v1.json"), data, 0666); err != nil {
+			return err
+		}
+
+		if ok, _ := IsZdfsLayer(parentDir); HasCommitLayerFlag(parentDir) || ok {
+			return AddCommitLayerFlag(o.getSnDir(id))
+		}
+	}
+	return nil
+}
+
 func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (string, snapshots.Info, error) {
 	id, _, _, err := storage.GetInfo(ctx, key)
 	if err != nil {
@@ -709,6 +779,7 @@ func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snap
 	if err != nil {
 		return "", snapshots.Info{}, err
 	}
+	o.CommitMark(ctx, id, info.Parent)
 	return id, info, nil
 }
 
@@ -744,6 +815,22 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 	}
 
+	// for TypeNormal, verify its(parent) meets the condition of overlaybd format
+	if s, err := storage.GetSnapshot(ctx, key); err == nil && s.Kind == snapshots.KindActive && len(s.ParentIDs) > 0 {
+		o.locker.Lock(s.ID)
+		defer o.locker.Unlock(s.ID)
+		o.locker.Lock(s.ParentIDs[0])
+		defer o.locker.Unlock(s.ParentIDs[0])
+
+		log.G(ctx).Debugf("try to verify parent snapshots format.")
+		if st, err := o.identifySnapshotStorageType(ctx, s.ParentIDs[0], info); err == nil && st != storageTypeNormal {
+			err = o.unmountAndDetachBlockDevice(ctx, s.ParentIDs[0], "")
+			if err != nil {
+				return errors.Wrapf(err, "failed to destroy target device for snapshot %s", key)
+			}
+		}
+	}
+
 	defer func() {
 		if err != nil && rollback {
 			if rerr := t.Rollback(); rerr != nil {
@@ -751,6 +838,8 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 			}
 		}
 	}()
+
+	o.umountStargz(id)
 
 	_, _, err = storage.Remove(ctx, key)
 	if err != nil {
@@ -787,24 +876,22 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 		return td, err
 	}
 
-	if kind == snapshots.KindActive {
-		if err := os.Mkdir(filepath.Join(td, "work"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "work"), 0711); err != nil {
+		return td, err
+	}
 
-		if err := os.Mkdir(filepath.Join(td, "block"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "block"), 0711); err != nil {
+		return td, err
+	}
 
-		if err := os.Mkdir(filepath.Join(td, "block", "mountpoint"), 0711); err != nil {
-			return td, err
-		}
+	if err := os.Mkdir(filepath.Join(td, "block", "mountpoint"), 0711); err != nil {
+		return td, err
+	}
 
-		f, err := os.Create(filepath.Join(td, "block", "init-debug.log"))
-		f.Close()
-		if err != nil {
-			return td, err
-		}
+	f, err := os.Create(filepath.Join(td, "block", "init-debug.log"))
+	f.Close()
+	if err != nil {
+		return td, err
 	}
 	return td, nil
 }
@@ -857,8 +944,19 @@ func (o *snapshotter) basedOnBlockDeviceMount(ctx context.Context, s storage.Sna
 			options = append(options,
 				fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
 				fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
-				fmt.Sprintf("lowerdir=%s", o.overlaybdMountpoint(s.ParentIDs[0])),
 			)
+			lowers := o.convertIDsToDirs(s.ParentIDs)
+			var fsLowers []string
+			for i := range lowers {
+				if HasCommitLayerFlag(lowers[i]) {
+					fsLowers = append(fsLowers, filepath.Join(lowers[i], "fs"))
+				}
+			}
+			if len(fsLowers) > 0 {
+				options = append(options, fmt.Sprintf("lowerdir=%s:%s", strings.Join(fsLowers, ":"), o.overlaybdMountpoint(s.ParentIDs[0])))
+			} else {
+				options = append(options, fmt.Sprintf("lowerdir=%s", o.overlaybdMountpoint(s.ParentIDs[0])))
+			}
 			return []mount.Mount{
 				{
 					Type:    "overlay",
@@ -1022,12 +1120,12 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string, info snapshots.Info) (storageType, error) {
 	if _, ok := info.Labels[labelKeyTargetSnapshotRef]; ok {
-		_, hasBDBlobSize := info.Labels[labelKeyOverlayBDBlobSize]
-		_, hasBDBlobDigest := info.Labels[labelKeyOverlayBDBlobDigest]
-		_, hasRef := info.Labels[labelKeyImageRef]
-		_, hasCriRef := info.Labels[labelKeyCriImageRef]
+		blobSize, hasBDBlobSize := info.Labels[labelKeyOverlayBDBlobSize]
+		blobDigest, hasBDBlobDigest := info.Labels[labelKeyOverlayBDBlobDigest]
+		ref, hasRef := info.Labels[labelKeyImageRef]
+		criRef, hasCriRef := info.Labels[labelKeyCriImageRef]
 
-		log.G(ctx).Debugf("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s")
+		log.G(ctx).Debugf("hasBDBlobSize: %s, hasBDBlobDigest: %s, hasRef: %s, hasCriRef: %s", blobSize, blobDigest, ref, criRef)
 		if hasBDBlobSize && hasBDBlobDigest {
 			if hasRef || hasCriRef {
 				return storageTypeRemoteBlock, nil

@@ -1,3 +1,19 @@
+/*
+   Copyright The Accelerated Container Image Authors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package snapshot
 
 import (
@@ -21,8 +37,7 @@ import (
 )
 
 var (
-	writeType   int
-	zdfsIsReady bool //indicate if zdfs' binaries or rpms are ready
+	writeType int
 )
 
 const (
@@ -121,7 +136,7 @@ func hasZdfsFlagFiles(dir string) (bool, error) {
 			return false, fmt.Errorf("LSMD ERROR failed to check if %s exists. err:%s", fullPath, err)
 		}
 
-		if b == false {
+		if !b {
 			return false, nil
 		}
 	}
@@ -140,6 +155,9 @@ func (o *snapshotter) MountDadiSnapshot(ctx context.Context, key string, info sn
 	//check dadi layer
 	dir := o.getSnDir(s.ParentIDs[0])
 	isDadi, err := IsZdfsLayer(dir)
+	if !isDadi {
+		isDadi = HasCommitLayerFlag(dir)
+	}
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("[DADI] invalid dadi snapshot as parent: %s", dir)
 		return false, "", errors.Wrapf(err, "[DADI] invalid dadi snapshot as parent")
@@ -262,7 +280,7 @@ func updateSpec(dir, recordTracePath string) error {
 func PrepareMeta(idDir string, lowers []string, info snapshots.Info, recordTracePath string) error {
 
 	makeConfig := func(dir string, parent string) error {
-		logrus.Info("ENTER makeConfig(dir: %s, parent: %s)", dir, parent)
+		logrus.Infof("ENTER makeConfig(dir: %s, parent: %s)", dir, parent)
 		dstDir := path.Join(dir, "block")
 
 		repo, digest, err := GetBlobRepoDigest(dstDir)
@@ -270,12 +288,16 @@ func PrepareMeta(idDir string, lowers []string, info snapshots.Info, recordTrace
 			return err
 		}
 
-		imageRef := info.Labels[labelKeyCriImageRef]
-		logrus.Infof("read imageRef from labelKeyCriImageRef: %s", imageRef)
-		repo, _ = constructImageBlobURL(imageRef)
+		refPath := path.Join(dir, ImageRefFile)
+		if b, _ := pathExists(refPath); b {
+			img, _ := ioutil.ReadFile(refPath)
+			imageRef := string(img)
+			logrus.Infof("read imageRef from labelKeyCriImageRef: %s", imageRef)
+			repo, _ = constructImageBlobURL(imageRef)
+		}
 		logrus.Infof("construct repoBlobUrl: %s", repo)
 
-		size, err := GetBlobSize(dstDir)
+		size, _ := GetBlobSize(dstDir)
 		if err := ConstructOverlayBDSpec(dir, parent, repo, digest, info, size, recordTracePath); err != nil {
 			return err
 		}

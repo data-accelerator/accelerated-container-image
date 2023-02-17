@@ -107,6 +107,7 @@ func rpull(ctx context.Context, client *containerd.Client, ref string, sn string
 		containerd.WithImageHandler(h),
 		containerd.WithPullUnpack,
 		containerd.WithPullSnapshotter(sn, snapshots.WithLabels(snLabels)),
+		containerd.WithImageHandlerWrapper(AppendDefaultLabelsHandlerWrapper(ref, 10*1024*1024)),
 	}
 
 	if config.PlatformMatcher != nil {
