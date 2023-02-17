@@ -952,6 +952,11 @@ func (o *snapshotter) basedOnBlockDeviceMount(ctx context.Context, s storage.Sna
 		// for ro mode, always has parent
 		if s.Kind == snapshots.KindActive {
 			var options []string
+			if !o.indexOff {
+				if _, err = os.Stat("/sys/module/overlay/parameters/index"); err == nil {
+					o.indexOff = true
+				}
+			}
 			if o.indexOff {
 				options = append(options, "index=off")
 			}
@@ -1023,7 +1028,11 @@ func (o *snapshotter) normalOverlayMount(s storage.Snapshot) []mount.Mount {
 		}
 	}
 	var options []string
-
+	if !o.indexOff {
+		if _, err := os.Stat("/sys/module/overlay/parameters/index"); err == nil {
+			o.indexOff = true
+		}
+	}
 	if o.indexOff {
 		options = append(options, "index=off")
 	}
