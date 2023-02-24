@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -54,18 +55,18 @@ type overlaybdBuilder struct {
 }
 
 type builderEngine interface {
-	downloadLayer(ctx context.Context, idx int) error
+	DownloadLayer(ctx context.Context, idx int) error
 
 	// build layer archive, maybe tgz or zfile
-	buildLayer(ctx context.Context, idx int) error
+	BuildLayer(ctx context.Context, idx int) error
 
-	uploadLayer(ctx context.Context, idx int) error
+	UploadLayer(ctx context.Context, idx int) error
 
 	// UploadImage upload new manifest and config
-	uploadImage(ctx context.Context) error
+	UploadImage(ctx context.Context) error
 
 	// cleanup remove workdir
-	cleanup()
+	Cleanup()
 }
 
 type builderEngineBase struct {
@@ -74,6 +75,11 @@ type builderEngineBase struct {
 	manifest specs.Manifest
 	config   specs.Image
 	workDir  string
+}
+
+func (e *builderEngineBase) isGzipLayer(idx int) bool {
+	return e.manifest.Layers[idx].MediaType == specs.MediaTypeImageLayerGzip ||
+		e.manifest.Layers[idx].MediaType == images.MediaTypeDockerSchema2LayerGzip
 }
 
 func NewOverlayBDBuilder(ctx context.Context, opt BuilderOptions) (Builder, error) {
@@ -106,7 +112,7 @@ func NewOverlayBDBuilder(ctx context.Context, opt BuilderOptions) (Builder, erro
 }
 
 func (b *overlaybdBuilder) Build(ctx context.Context) error {
-	defer b.engine.cleanup()
+	defer b.engine.Cleanup()
 	downloaded := make([]chan error, b.layers)
 	converted := make([]chan error, b.layers)
 	var uploaded sync.WaitGroup
@@ -136,7 +142,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) error {
 		// download goroutine
 		go func(idx int) {
 			defer close(downloaded[idx])
-			if err := b.engine.downloadLayer(ctx, idx); err != nil {
+			if err := b.engine.DownloadLayer(ctx, idx); err != nil {
 				contextSendChan(ctx, errCh, errors.Wrapf(err, "failed to download layer %d", idx))
 				return
 			}
@@ -155,7 +161,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) error {
 					return
 				}
 			}
-			if err := b.engine.buildLayer(ctx, idx); err != nil {
+			if err := b.engine.BuildLayer(ctx, idx); err != nil {
 				contextSendChan(ctx, errCh, errors.Wrapf(err, "failed to convert layer %d", idx))
 				return
 			}
@@ -174,7 +180,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) error {
 			if contextReceiveChan(ctx, converted[idx]); ctx.Err() != nil {
 				return
 			}
-			if err := b.engine.uploadLayer(ctx, idx); err != nil {
+			if err := b.engine.UploadLayer(ctx, idx); err != nil {
 				contextSendChan(ctx, errCh, errors.Wrapf(err, "failed to upload layer %d", idx))
 				return
 			}
@@ -186,7 +192,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) error {
 		return retErr
 	}
 
-	if err := b.engine.uploadImage(ctx); err != nil {
+	if err := b.engine.UploadImage(ctx); err != nil {
 		return errors.Wrap(err, "failed to upload manifest or config")
 	}
 	logrus.Info("convert finished")

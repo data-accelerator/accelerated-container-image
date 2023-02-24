@@ -120,6 +120,10 @@ const (
 	// labelKeyFastOCIImageRef is the digest of remote oci image
 	labelKeyFastOCIDigest = "containerd.io/snapshot/overlaybd/fastoci"
 
+	// labelKeyGzipIndex is the annotation key in the manifest to indicate
+	// where a layer is gzip layer or not.
+	labelKeyGzipIndex = "containerd.io/snapshot/overlaybd/gzip-index"
+
 	remoteLabel    = "containerd.io/snapshot/remote"
 	remoteLabelVal = "remote snapshot"
 )
@@ -1243,6 +1247,10 @@ func (o *snapshotter) overlaybdBackstoreMarkFile(id string) string {
 
 func (o *snapshotter) fociFsMeta(id string) string {
 	return filepath.Join(o.root, "snapshots", id, "fs", "ext4.fs.meta")
+}
+
+func (o *snapshotter) fociGzipIndex(id string) string {
+	return filepath.Join(o.root, "snapshots", id, "fs", "gzip.meta")
 }
 
 // Close closes the snapshotter

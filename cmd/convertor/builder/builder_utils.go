@@ -24,9 +24,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"os/exec"
 	"path"
-	"path/filepath"
 
 	"github.com/containerd/accelerated-container-image/pkg/snapshot"
 	"github.com/containerd/containerd/archive/compression"
@@ -129,20 +127,6 @@ func downloadLayer(ctx context.Context, fetcher remotes.Fetcher, targetFile stri
 	return nil
 }
 
-func prepareWritableLayer(ctx context.Context, dir string) error {
-	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-create")
-	dataPath := path.Join(dir, "writable_data")
-	indexPath := path.Join(dir, "writable_index")
-	os.RemoveAll(dataPath)
-	os.RemoveAll(indexPath)
-	out, err := exec.CommandContext(ctx, binpath, "-s",
-		dataPath, indexPath, "64").CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "failed to overlaybd-create: %s", out)
-	}
-	return nil
-}
-
 // TODO maybe refactor this
 func writeConfig(dir string, configJSON *snapshot.OverlayBDBSConfig) error {
 	data, err := json.Marshal(configJSON)
@@ -153,19 +137,6 @@ func writeConfig(dir string, configJSON *snapshot.OverlayBDBSConfig) error {
 	confPath := path.Join(dir, "config.json")
 	if err := continuity.AtomicWriteFile(confPath, data, 0600); err != nil {
 		return err
-	}
-	return nil
-}
-
-func overlaybdCommit(ctx context.Context, dir, commitFile string) error {
-	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-commit")
-
-	out, err := exec.CommandContext(ctx, binpath, "-z",
-		path.Join(dir, "writable_data"),
-		path.Join(dir, "writable_index"),
-		path.Join(dir, commitFile)).CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(err, "failed to overlaybd-commit: %s", out)
 	}
 	return nil
 }

@@ -72,17 +72,20 @@ type OverlayBDBSConfig struct {
 
 // OverlayBDBSConfigLower
 type OverlayBDBSConfigLower struct {
-	File       string `json:"file,omitempty"`
-	Digest     string `json:"digest,omitempty"`
-	DataFile   string `json:"dataFile,omitempty"`
-	DataDigest string `json:"dataDigest,omitempty"`
-	Size       int64  `json:"size,omitempty"`
-	Dir        string `json:"dir,omitempty"`
+	GzipIndex    string `json:"gzipIndex,omitempty"`
+	File         string `json:"file,omitempty"`
+	Digest       string `json:"digest,omitempty"`
+	TargetFile   string `json:"targetFile,omitempty"`
+	TargetDigest string `json:"targetDigest,omitempty"`
+	Size         int64  `json:"size,omitempty"`
+	Dir          string `json:"dir,omitempty"`
 }
 
 type OverlayBDBSConfigUpper struct {
-	Index string `json:"index,omitempty"`
-	Data  string `json:"data,omitempty"`
+	Index     string `json:"index,omitempty"`
+	Data      string `json:"data,omitempty"`
+	Target    string `json:"target,omitempty"`
+	GzipIndex string `json:"gzipIndex,omitempty"`
 }
 
 func (o *snapshotter) checkOverlaybdInUse(ctx context.Context, dir string) (bool, error) {
@@ -520,13 +523,17 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key, id string
 
 		configJSON.RepoBlobURL = blobPrefixURL
 		if dataDgst, isFastOCI := info.Labels[labelKeyFastOCIDigest]; isFastOCI {
-			configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
-				Digest:     blobDigest,
-				Size:       int64(blobSize),
-				Dir:        o.upperPath(id),
-				File:       o.fociFsMeta(id),
-				DataDigest: dataDgst,
-			})
+			lower := OverlayBDBSConfigLower{
+				Digest:       blobDigest,
+				Size:         int64(blobSize),
+				Dir:          o.upperPath(id),
+				File:         o.fociFsMeta(id),
+				TargetDigest: dataDgst,
+			}
+			if _, isGzip := info.Labels[labelKeyGzipIndex]; isGzip {
+				lower.GzipIndex = o.fociGzipIndex(id)
+			}
+			configJSON.Lowers = append(configJSON.Lowers, lower)
 		} else {
 			configJSON.Lowers = append(configJSON.Lowers, OverlayBDBSConfigLower{
 				Digest: blobDigest,

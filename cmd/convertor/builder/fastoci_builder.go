@@ -36,8 +36,8 @@ const (
 	// labelKeyFOCI contains OCI image layer digests witch the foci index points
 	labelKeyFOCI = "containerd.io/snapshot/overlaybd/fastoci"
 
-	// TODO make foci baselayer compatible with overlaybd
-	fociBaseLayer = "/opt/overlaybd/baselayers/foci-base"
+	// labelGzipIndex is used with layers in gzip format
+	labelGzipIndex = "containerd.io/snapshot/overlaybd/gzip-index"
 
 	// index of OCI layers (gzip)
 	gzipMetaFile = "gzip.meta"
@@ -64,7 +64,7 @@ func NewFastOCIBuilderEngine(base *builderEngineBase) builderEngine {
 		ResultFile: "",
 	}
 	config.Lowers = append(config.Lowers, snapshot.OverlayBDBSConfigLower{
-		File: fociBaseLayer,
+		File: overlaybdBaseLayer,
 	})
 	return &fastOCIBuilderEngine{
 		builderEngineBase: base,
@@ -73,55 +73,58 @@ func NewFastOCIBuilderEngine(base *builderEngineBase) builderEngine {
 	}
 }
 
-func (e *fastOCIBuilderEngine) downloadLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) DownloadLayer(ctx context.Context, idx int) error {
 	desc := e.manifest.Layers[idx]
 	targetFile := path.Join(e.getLayerDir(idx), "layer.tar")
 	return downloadLayer(ctx, e.fetcher, targetFile, desc, false)
 }
 
-func (e *fastOCIBuilderEngine) buildLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) BuildLayer(ctx context.Context, idx int) error {
+	isGzip := e.isGzipLayer(idx)
 	layerDir := e.getLayerDir(idx)
-	if err := prepareWritableLayer(ctx, layerDir); err != nil {
+	if err := e.create(ctx, layerDir); err != nil {
 		return err
 	}
 	e.overlaybdConfig.Upper = snapshot.OverlayBDBSConfigUpper{
-		Data:  path.Join(layerDir, "writable_data"),
-		Index: path.Join(layerDir, "writable_index"),
+		Data:   path.Join(layerDir, "writable_data"),
+		Index:  path.Join(layerDir, "writable_index"),
+		Target: path.Join(layerDir, "layer.tar"),
 	}
 	if err := writeConfig(layerDir, e.overlaybdConfig); err != nil {
 		return err
 	}
-	if err := fociApply(ctx, layerDir); err != nil {
+	if err := e.apply(ctx, layerDir); err != nil {
 		return err
 	}
-	if err := overlaybdCommit(ctx, layerDir, fsMetaFile); err != nil {
+	if err := e.commit(ctx, layerDir); err != nil {
 		return err
-	}
-	// For now, overlaybd-foci-apply generate gzip.meta at workdir
-	// TODO refactor this
-	if err := os.Rename(gzipMetaFile, path.Join(layerDir, gzipMetaFile)); err != nil {
-		return errors.Wrapf(err, "failed to move file %q", gzipMetaFile)
 	}
 	if err := e.createIdentifier(idx); err != nil {
 		return errors.Wrapf(err, "failed to create identifier %q", fociIdentifier)
 	}
-	if err := buildArchiveFromFiles(ctx, path.Join(layerDir, fociLayerTar), compression.Gzip,
+	files := []string{
 		path.Join(layerDir, fsMetaFile),
-		path.Join(layerDir, gzipMetaFile),
 		path.Join(layerDir, fociIdentifier),
-	); err != nil {
+	}
+	gzipIndexPath := ""
+	if isGzip {
+		gzipIndexPath = path.Join(layerDir, gzipMetaFile)
+		files = append(files, gzipIndexPath)
+	}
+	if err := buildArchiveFromFiles(ctx, path.Join(layerDir, fociLayerTar), compression.Gzip, files...); err != nil {
 		return errors.Wrapf(err, "failed to create foci archive for layer %d", idx)
 	}
 	e.overlaybdConfig.Lowers = append(e.overlaybdConfig.Lowers, snapshot.OverlayBDBSConfigLower{
-		DataFile: path.Join(layerDir, "layer.tar"),
-		File:     path.Join(layerDir, fsMetaFile),
+		TargetFile: path.Join(layerDir, "layer.tar"),
+		File:       path.Join(layerDir, fsMetaFile),
+		GzipIndex:  gzipIndexPath,
 	})
 	os.Remove(path.Join(layerDir, "writable_data"))
 	os.Remove(path.Join(layerDir, "writable_index"))
 	return nil
 }
 
-func (e *fastOCIBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
+func (e *fastOCIBuilderEngine) UploadLayer(ctx context.Context, idx int) error {
 	layerDir := e.getLayerDir(idx)
 	desc, err := getFileDesc(path.Join(layerDir, fociLayerTar), false)
 	if err != nil {
@@ -133,6 +136,9 @@ func (e *fastOCIBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
 		labelKeyOverlayBDBlobSize:   fmt.Sprintf("%d", desc.Size),
 		labelKeyFOCI:                e.manifest.Layers[idx].Digest.String(),
 	}
+	if e.isGzipLayer(idx) {
+		desc.Annotations[labelGzipIndex] = "true"
+	}
 	if err := uploadBlob(ctx, e.pusher, path.Join(layerDir, fociLayerTar), desc); err != nil {
 		return errors.Wrapf(err, "failed to upload layer %d", idx)
 	}
@@ -140,7 +146,7 @@ func (e *fastOCIBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
 	return nil
 }
 
-func (e *fastOCIBuilderEngine) uploadImage(ctx context.Context) error {
+func (e *fastOCIBuilderEngine) UploadImage(ctx context.Context) error {
 	for idx := range e.manifest.Layers {
 		layerDir := e.getLayerDir(idx)
 		uncompress, err := getFileDesc(path.Join(layerDir, fociLayerTar), true)
@@ -150,25 +156,24 @@ func (e *fastOCIBuilderEngine) uploadImage(ctx context.Context) error {
 		e.manifest.Layers[idx] = e.fociLayers[idx]
 		e.config.RootFS.DiffIDs[idx] = uncompress.Digest
 	}
-	// TODO make foci baselayer compatible with overlaybd
 	baseDesc := specs.Descriptor{
 		MediaType: images.MediaTypeDockerSchema2Layer,
-		Digest:    "sha256:936469fc5a3adbac0ae7017a7a5e3fd013950b4d8c1f7acf2924cb7e8cdf3c8d",
-		Size:      784349,
+		Digest:    "sha256:c3a417552a6cf9ffa959b541850bab7d7f08f4255425bf8b48c85f7b36b378d9",
+		Size:      4737695,
 		Annotations: map[string]string{
-			labelKeyOverlayBDBlobDigest: "sha256:936469fc5a3adbac0ae7017a7a5e3fd013950b4d8c1f7acf2924cb7e8cdf3c8d",
-			labelKeyOverlayBDBlobSize:   "784349",
+			labelKeyOverlayBDBlobDigest: "sha256:c3a417552a6cf9ffa959b541850bab7d7f08f4255425bf8b48c85f7b36b378d9",
+			labelKeyOverlayBDBlobSize:   "4737695",
 		},
 	}
-	if err := uploadBlob(ctx, e.pusher, fociBaseLayer, baseDesc); err != nil {
-		return errors.Wrapf(err, "failed to upload baselayer %q", fociBaseLayer)
+	if err := uploadBlob(ctx, e.pusher, overlaybdBaseLayer, baseDesc); err != nil {
+		return errors.Wrapf(err, "failed to upload baselayer %q", overlaybdBaseLayer)
 	}
 	e.manifest.Layers = append([]specs.Descriptor{baseDesc}, e.manifest.Layers...)
 	e.config.RootFS.DiffIDs = append([]digest.Digest{baseDesc.Digest}, e.config.RootFS.DiffIDs...)
 	return uploadManifestAndConfig(ctx, e.pusher, e.manifest, e.config)
 }
 
-func (e fastOCIBuilderEngine) cleanup() {
+func (e fastOCIBuilderEngine) Cleanup() {
 	os.RemoveAll(e.workDir)
 }
 
@@ -186,14 +191,45 @@ func (e *fastOCIBuilderEngine) createIdentifier(idx int) error {
 	return nil
 }
 
-func fociApply(ctx context.Context, dir string) error {
-	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-foci-apply")
+func (e *fastOCIBuilderEngine) create(ctx context.Context, dir string) error {
+	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-create")
+	dataPath := path.Join(dir, "writable_data")
+	indexPath := path.Join(dir, "writable_index")
+	os.RemoveAll(dataPath)
+	os.RemoveAll(indexPath)
+	out, err := exec.CommandContext(ctx, binpath, "-s",
+		dataPath, indexPath, "64", "--fastoci").CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to overlaybd-create: %s", out)
+	}
+	return nil
+}
+
+func (e *fastOCIBuilderEngine) apply(ctx context.Context, dir string) error {
+	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-apply")
 
 	out, err := exec.CommandContext(ctx, binpath,
 		path.Join(dir, "layer.tar"),
-		path.Join(dir, "config.json")).CombinedOutput()
+		path.Join(dir, "config.json"),
+		"--gz_index_path", path.Join(dir, gzipMetaFile),
+	).CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to overlaybd-foci-apply: %s", out)
+		return errors.Wrapf(err, "failed to overlaybd-apply: %s", out)
+	}
+	return nil
+}
+
+func (e *fastOCIBuilderEngine) commit(ctx context.Context, dir string) error {
+	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-commit")
+
+	out, err := exec.CommandContext(ctx, binpath, "-z",
+		path.Join(dir, "writable_data"),
+		path.Join(dir, "writable_index"),
+		path.Join(dir, fsMetaFile),
+		"--fastoci",
+	).CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to overlaybd-commit: %s", out)
 	}
 	return nil
 }

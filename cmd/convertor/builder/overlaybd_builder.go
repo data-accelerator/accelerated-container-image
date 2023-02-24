@@ -70,15 +70,15 @@ func NewOverlayBDBuilderEngine(base *builderEngineBase) builderEngine {
 	}
 }
 
-func (e *overlaybdBuilderEngine) downloadLayer(ctx context.Context, idx int) error {
+func (e *overlaybdBuilderEngine) DownloadLayer(ctx context.Context, idx int) error {
 	desc := e.manifest.Layers[idx]
 	targetFile := path.Join(e.getLayerDir(idx), "layer.tar")
 	return downloadLayer(ctx, e.fetcher, targetFile, desc, true)
 }
 
-func (e *overlaybdBuilderEngine) buildLayer(ctx context.Context, idx int) error {
+func (e *overlaybdBuilderEngine) BuildLayer(ctx context.Context, idx int) error {
 	layerDir := e.getLayerDir(idx)
-	if err := prepareWritableLayer(ctx, layerDir); err != nil {
+	if err := e.create(ctx, layerDir); err != nil {
 		return err
 	}
 	e.overlaybdConfig.Upper = snapshot.OverlayBDBSConfigUpper{
@@ -88,10 +88,10 @@ func (e *overlaybdBuilderEngine) buildLayer(ctx context.Context, idx int) error 
 	if err := writeConfig(layerDir, e.overlaybdConfig); err != nil {
 		return err
 	}
-	if err := overlaybdApply(ctx, layerDir); err != nil {
+	if err := e.apply(ctx, layerDir); err != nil {
 		return err
 	}
-	if err := overlaybdCommit(ctx, layerDir, commitFile); err != nil {
+	if err := e.commit(ctx, layerDir); err != nil {
 		return err
 	}
 	e.overlaybdConfig.Lowers = append(e.overlaybdConfig.Lowers, snapshot.OverlayBDBSConfigLower{
@@ -103,7 +103,7 @@ func (e *overlaybdBuilderEngine) buildLayer(ctx context.Context, idx int) error 
 	return nil
 }
 
-func (e *overlaybdBuilderEngine) uploadLayer(ctx context.Context, idx int) error {
+func (e *overlaybdBuilderEngine) UploadLayer(ctx context.Context, idx int) error {
 	layerDir := e.getLayerDir(idx)
 	desc, err := getFileDesc(path.Join(layerDir, commitFile), false)
 	if err != nil {
@@ -121,7 +121,7 @@ func (e *overlaybdBuilderEngine) uploadLayer(ctx context.Context, idx int) error
 	return nil
 }
 
-func (e *overlaybdBuilderEngine) uploadImage(ctx context.Context) error {
+func (e *overlaybdBuilderEngine) UploadImage(ctx context.Context) error {
 	for idx := range e.manifest.Layers {
 		e.manifest.Layers[idx] = e.overlaybdLayers[idx]
 		e.config.RootFS.DiffIDs[idx] = e.overlaybdLayers[idx].Digest
@@ -143,7 +143,7 @@ func (e *overlaybdBuilderEngine) uploadImage(ctx context.Context) error {
 	return uploadManifestAndConfig(ctx, e.pusher, e.manifest, e.config)
 }
 
-func (e *overlaybdBuilderEngine) cleanup() {
+func (e *overlaybdBuilderEngine) Cleanup() {
 	os.RemoveAll(e.workDir)
 }
 
@@ -151,14 +151,43 @@ func (e *overlaybdBuilderEngine) getLayerDir(idx int) string {
 	return path.Join(e.workDir, fmt.Sprintf("%04d_", idx)+e.manifest.Layers[idx].Digest.String())
 }
 
-func overlaybdApply(ctx context.Context, dir string) error {
+func (e *overlaybdBuilderEngine) create(ctx context.Context, dir string) error {
+	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-create")
+	dataPath := path.Join(dir, "writable_data")
+	indexPath := path.Join(dir, "writable_index")
+	os.RemoveAll(dataPath)
+	os.RemoveAll(indexPath)
+	out, err := exec.CommandContext(ctx, binpath, "-s",
+		dataPath, indexPath, "64").CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to overlaybd-create: %s", out)
+	}
+	return nil
+}
+
+func (e *overlaybdBuilderEngine) apply(ctx context.Context, dir string) error {
 	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-apply")
 
 	out, err := exec.CommandContext(ctx, binpath,
 		path.Join(dir, "layer.tar"),
-		path.Join(dir, "config.json")).CombinedOutput()
+		path.Join(dir, "config.json"),
+	).CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "failed to overlaybd-apply: %s", out)
+	}
+	return nil
+}
+
+func (e *overlaybdBuilderEngine) commit(ctx context.Context, dir string) error {
+	binpath := filepath.Join("/opt/overlaybd/bin", "overlaybd-commit")
+
+	out, err := exec.CommandContext(ctx, binpath, "-z",
+		path.Join(dir, "writable_data"),
+		path.Join(dir, "writable_index"),
+		path.Join(dir, commitFile),
+	).CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to overlaybd-commit: %s", out)
 	}
 	return nil
 }
